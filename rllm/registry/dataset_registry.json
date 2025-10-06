@@ -1,0 +1,6 @@
+{
+  "frozenlake": {
+    "train": "/Users/lukedhlee/rllm/rllm/data/datasets/frozenlake/train.parquet",
+    "test": "/Users/lukedhlee/rllm/rllm/data/datasets/frozenlake/test.parquet"
+  }
+}

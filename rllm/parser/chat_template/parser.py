@@ -6,6 +6,18 @@ class ChatTemplateParser:
         self.tokenizer = tokenizer
         self.assistant_token = ""
 
+    @staticmethod
+    def extract_text_content(content):
+        """Extract text from message content, handling multimodal format (list with images)."""
+        if isinstance(content, list):
+            # Content is a list of multimodal elements (text, images, etc.)
+            text_parts = []
+            for item in content:
+                if isinstance(item, dict) and item.get("type") == "text":
+                    text_parts.append(item.get("text", ""))
+            return " ".join(text_parts)
+        return content  # Already a string
+
     def parse(self, messages, add_generation_prompt=False, is_first_msg=False, **kwargs) -> str:
         return self.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=add_generation_prompt)
 
@@ -116,7 +128,8 @@ class DeepseekQwenChatTemplateParser(ChatTemplateParser):
         return self.system_token + message["content"]
 
     def parse_user(self, message):
-        return self.user_token + message["content"]
+        content = self.extract_text_content(message["content"])
+        return self.user_token + content
 
     def parse_assistant(self, message):
         return self.assistant_token + message["content"] + self.eos_token
@@ -168,7 +181,8 @@ class QwenChatTemplateParser(ChatTemplateParser):
         return self.system_token + message["content"] + self.eot_token
 
     def parse_user(self, message):
-        return self.user_token + message["content"] + self.eot_token
+        content = self.extract_text_content(message["content"])
+        return self.user_token + content + self.eot_token
 
     def parse_assistant(self, message):
         result = self.assistant_token + message["content"] + self.eot_token
@@ -220,7 +234,8 @@ class LlamaChatTemplateParser(ChatTemplateParser):
         return self.system_token + message["content"] + self.eot_token
 
     def parse_user(self, message):
-        return self.user_token + message["content"] + self.eot_token
+        content = self.extract_text_content(message["content"])
+        return self.user_token + content + self.eot_token
 
     def parse_assistant(self, message):
         return self.assistant_token + message["content"] + self.eot_token

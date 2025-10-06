@@ -29,9 +29,9 @@ dependencies = [
     # Training and inference
     "deepspeed; sys_platform != 'darwin'",  # Skip on macOS
     "vllm>=0.8.3; sys_platform != 'darwin'",  # Skip on macOS
-    "sgl-kernel",
+    "sgl-kernel; sys_platform != 'darwin'",  # Skip on macOS
     "sglang>=0.4.8.post1",
-    "sglang-router",
+    "sglang-router; sys_platform != 'darwin'",  # Skip on macOS
     "peft",
     "torchao",
 

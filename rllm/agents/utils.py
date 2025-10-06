@@ -54,7 +54,20 @@ def convert_messages_to_tokens_and_masks(messages: list[dict[str, str]], tokeniz
     all_msg_masks = []
 
     def _convert_message_to_tokens_and_masks(msg, first_msg=False, generation_msg=False):
-        msg_text = parser.parse([msg], add_generation_prompt=generation_msg, is_first_msg=first_msg)
+        # Handle multimodal messages (with images) - extract only text content
+        msg_to_parse = msg.copy()
+        if isinstance(msg.get("content"), list):
+            # Content is a list of multimodal elements (text, images, etc.)
+            # Extract only the text parts for tokenization
+            text_parts = []
+            for item in msg["content"]:
+                if isinstance(item, dict) and item.get("type") == "text": 
+                    text_parts.append(item.get("text", ""))
+            # Combine all text parts and create a simple message for parsing
+            msg_to_parse = msg.copy()
+            msg_to_parse["content"] = " ".join(text_parts)
+        
+        msg_text = parser.parse([msg_to_parse], add_generation_prompt=generation_msg, is_first_msg=first_msg)
 
         # Remove the assistant token since it is contained in previous message as generation prompt
         if msg["role"] == "assistant":

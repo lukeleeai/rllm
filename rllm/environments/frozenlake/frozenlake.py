@@ -5,7 +5,16 @@
 #
 # Some components have been modified or extended for custom use in this project.
 
+import os
+# Set pygame to use headless rendering (must be before pygame/gymnasium import)
+os.environ['SDL_VIDEODRIVER'] = 'dummy'
+os.environ['PYGAME_HIDE_SUPPORT_PROMPT'] = '1'
+
 import copy
+import logging
+import base64
+import io
+from PIL import Image
 
 import gymnasium as gym
 import numpy as np
@@ -13,6 +22,8 @@ from gymnasium.envs.toy_text.frozen_lake import FrozenLakeEnv as GymFrozenLakeEn
 from gymnasium.utils import seeding
 
 from rllm.environments.base.base_env import BaseEnv
+
+logger = logging.getLogger(__name__)
 
 MAX_STEPS: int = 5
 
@@ -88,6 +99,16 @@ def get_goal_position(random_map):
     if positions.size == 0:
         return None  # G not found
     return tuple(positions[0])  # returns (row, col)
+
+
+
+def encode_image(image_content):
+    """Encode a numpy array image to base64 PNG string."""
+    img = Image.fromarray(image_content)
+    buffered = io.BytesIO()
+    img.save(buffered, format="PNG")
+    return base64.b64encode(buffered.getvalue()).decode("utf-8")   
+
 
 
 class FrozenLakeEnv(GymFrozenLakeEnv, BaseEnv):
@@ -202,6 +223,7 @@ class FrozenLakeEnv(GymFrozenLakeEnv, BaseEnv):
 
         self.reward = 0
         self._valid_actions = []
+        self.step_count = 0
 
     def _get_player_position(self):
         return (self.s // self.ncol, self.s % self.ncol)  # (row, col)
@@ -209,7 +231,20 @@ class FrozenLakeEnv(GymFrozenLakeEnv, BaseEnv):
     def reset(self):
         self.__init__(size=self.map_kwargs["size"], p=self.map_kwargs["p"], seed=self.seed, is_slippery=self.env_kwargs["is_slippery"], desc=self.desc)
         GymFrozenLakeEnv.reset(self, seed=self.seed)
-        return self.render(mode="tiny_rgb_array"), {}
+        # obs = self.render(mode="tiny_rgb_array")
+        obs = self.render(mode="encoded_image")
+
+        logger.info("🔄" * 30)
+        logger.info("ENVIRONMENT RESET - NEW EPISODE")
+        logger.info("🔄" * 30)
+        # logger.info(f"Initial Grid State:")
+        # logger.info(f"\n{obs}")
+        logger.info(f"Grid Size: {self.size}x{self.size}")
+        logger.info(f"Goal Position: {self.goal_postion}")
+        logger.info(f"Is Slippery: {self.env_kwargs['is_slippery']}")
+        logger.info("🔄" * 30)
+        
+        return obs, {}
 
     def finished(self):
         player_pos = self._get_player_position()
@@ -227,7 +262,14 @@ class FrozenLakeEnv(GymFrozenLakeEnv, BaseEnv):
         - Map custom action to gymnasium FrozenLakeEnv action and take the step
         - Check if the action is effective (whether player moves in the env).
         """
+        self.step_count += 1
+        action_name = self.ACTION_LOOKUP.get(int(action) if action else 0, 'Unknown')
+        logger.info("*" * 60)
+        logger.info(f"🎮 ENVIRONMENT ACTION: {action} ({action_name})")
+        logger.info("*" * 60)
+        
         if self.success():
+            logger.info("✅ Already at goal, returning success")
             return self.render(), 1, True, {"action_is_effective": False}
 
         if not action:
@@ -237,17 +279,65 @@ class FrozenLakeEnv(GymFrozenLakeEnv, BaseEnv):
         assert not self.success(), "Agent has already reached the goal or hole"
 
         if action == self.INVALID_ACTION:  # no penalty for invalid action
+            logger.warning("❌ INVALID ACTION - No movement will occur")
             return self.render(), 0, False, {"action_is_effective": False}
 
         prev_player_position = int(self.s)
+        prev_player_coords = self._get_player_position()
+        logger.info(f"Player position before: {prev_player_coords} (index: {prev_player_position})")
 
         player_pos, reward, done, _, prob = GymFrozenLakeEnv.step(self, self.action_map[action])
 
+        new_player_coords = self._get_player_position()
         obs = self.render()
+        
+        # Show grid AFTER action
+        logger.info(f"\nGrid AFTER action:")
+        # logger.info(f"\n{obs}")
+        logger.info(f"Player position after: {new_player_coords} (index: {int(player_pos)})")
+        logger.info(f"Movement effective: {prev_player_position != int(player_pos)}")
+        logger.info(f"Reward: {reward}, Done: {done}")
+        logger.info("*" * 60)
+
+        
+        
         return obs, reward, done, {"action_is_effective": prev_player_position != int(player_pos)}
 
-    def render(self, mode="tiny_rgb_array"):
-        assert mode in ["tiny_rgb_array", "list", "state", "rgb_array", "ansi"]
+    def render(self, mode="encoded_image"):
+        assert mode in ["encoded_image", "tiny_rgb_array", "list", "state", "rgb_array", "ansi", "dual"]
+        
+        # Handle default mode - save image and return encoded version
+        if mode == "encoded_image":
+            # Create images directory if it doesn't exist
+            os.makedirs("images", exist_ok=True)
+            
+            # Get the rgb_array from gymnasium
+            prev_render_mode = self.render_mode
+            self.render_mode = "rgb_array"
+            image_obs = GymFrozenLakeEnv.render(self)
+            self.render_mode = prev_render_mode
+            
+            # Save the image to images folder
+            image = Image.fromarray(image_obs)
+            image_path = f"images/frozenlake_step_{self.step_count}.png"
+            image.save(image_path)
+            
+            # Encode and return
+            encoded_image = encode_image(image_obs)
+            return encoded_image
+        
+        # Handle dual mode - returns both text and image
+        if mode == "dual":
+            text_obs = self.render(mode="tiny_rgb_array")
+            encoded_image_obs = self.render(mode="encoded_image")
+            
+            return {
+                "text": text_obs,
+                "image": encoded_image_obs,
+                "state": self.render(mode="state"),
+                "list": self.render(mode="list")
+            }
+        
         if mode in ["rgb_array", "ansi"]:
             prev_render_mode = self.render_mode
             self.render_mode = mode

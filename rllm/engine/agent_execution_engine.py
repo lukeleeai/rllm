@@ -1,6 +1,7 @@
 import asyncio
 import concurrent.futures
 import logging
+import base64
 import time
 import traceback
 import uuid
@@ -26,6 +27,9 @@ from rllm.parser.chat_template.parser import ChatTemplateParser
 from rllm.router.router import Router
 
 logger = logging.getLogger(__name__)
+
+def encode_image(image_content):
+    return base64.b64encode(image_content).decode("utf-8")
 
 
 class AgentExecutionEngine:
@@ -182,7 +186,7 @@ class AgentExecutionEngine:
         response = response.replace(pad_token, "").replace(eos_token, "")
         return response
 
-    async def _get_openai_async(self, prompt, _, **kwargs):
+    async def _get_openai_async(self, messages, application_id, **kwargs):
         """
         Get action from OpenAI API asynchronously with retry logic.
 
@@ -195,12 +199,13 @@ class AgentExecutionEngine:
             The response from OpenAI API
         """
 
-        async def get_response(prompt_text: str):
+        async def get_response(messages):
             retries = self.api_retries
             while retries > 0:
                 try:
-                    response = await self.client.completions.create(
-                        prompt=prompt_text,
+                    # Use chat.completions.create for messages format
+                    response = await self.client.chat.completions.create(
+                        messages=messages,
                         timeout=3600,
                         **self.sampling_params,
                         **kwargs,
@@ -216,14 +221,30 @@ class AgentExecutionEngine:
                     logger.error("Error: %s", e)
                     return f"Error processing content: {e}"
 
-        # If prompt is in chat format, convert it to text format
-        prompt_text = prompt
-        if isinstance(prompt, list) and all(isinstance(msg, dict) for msg in prompt):
-            prompt_text = self.chat_parser.parse(prompt, add_generation_prompt=True, is_first_msg=True)
+        # # If prompt is in chat format, convert it to text format
+        # prompt_text = prompt
+        # if isinstance(prompt, list) and all(isinstance(msg, dict) for msg in prompt):
+        #     prompt_text = self.chat_parser.parse(prompt, add_generation_prompt=True, is_first_msg=True)
 
-        response = await get_response(prompt_text)
-        if isinstance(response, Completion):
-            response = response.choices[0].text
+        # print("\033[91mThe actual message is: ", messages, "\033[0m")
+       
+        response = await get_response(messages)
+
+        print("\033[91mThe model response is: ", response, "\033[0m")
+        
+        # Handle different response types
+        if isinstance(response, str):
+            # Error message
+            return response
+        elif hasattr(response, 'choices') and len(response.choices) > 0:
+            # Check if it's a chat completion (has message attribute)
+            if hasattr(response.choices[0], 'message'):
+                # Chat completion response
+                return response.choices[0].message.content
+            else:
+                # Regular completion response
+                return response.choices[0].text
+        
         return response
 
     async def run_agent_trajectory_async(self, idx, application_id, seed=0, mode="Text", **kwargs):
@@ -288,9 +309,12 @@ class AgentExecutionEngine:
 
             kwargs["max_tokens"] = max_tokens
 
+            logger.info(f"[Trajectory {idx}, Step {step_idx}] Querying model with {len(prompt_messages)} messages...")
             start_time = time.time()
             response = await self.get_model_response(prompt_messages, application_id, **kwargs)
+            # @luke: this is where we feed the inputs to a model
             delta_time = time.time() - start_time
+            logger.info(f"[Trajectory {idx}, Step {step_idx}] Model response received in {delta_time:.2f}s")
             llm_time += delta_time
             total_time += delta_time
             # Update steps
@@ -309,6 +333,7 @@ class AgentExecutionEngine:
 
             try:
                 next_observation, reward, done, info = await asyncio.wait_for(loop.run_in_executor(self.executor, env.step, action), timeout=(self.trajectory_timeout - total_time))
+                # @luke: this is where we get the observation from the environment
             except asyncio.TimeoutError:
                 termination_reason = "ENV_TIMEOUT"
                 if step_idx == 0:

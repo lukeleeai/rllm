@@ -17,27 +17,50 @@ class FrozenLakeAgent(BaseAgent):
 FrozenLake Quick Guide
 Goal: Reach the goal (G). Player (P) and Goal (G) must overlap.
 
+This is a 4x4 grid world.
+The player is at (1, 0) and the goal is at (2, 2).
+
 Symbols:
-_ Frozen | O Hole | G Goal | P Player
+_ Frozen (white snow cell) | O Hole (Cell with a blue water color circle) | G Goal (present / treasure icon cell) | P Player (human figure)
+- The G goal has a present box icon with a yellow ribbon
+- You want to avoid a hole which is a blue water color circle
 
 Rules:
 1. Avoid falling into holes (O).
-2. Frozen tiles are slippery, you may move perpendicular to your intended direction.
 
 Valid Action (separated by | ):
-Up | Down | Left | Right
+```Up``` | ```Down``` | ```Left``` | ```Right```
 
 Rewards:
 Fall into hole: 0
 Reach goal: +1.0
 
 You will be provided the current observation, please decide on the next Action.
-You should show your thought process and then input the final action in ``` ```.
+You should show your thinking process with <think> and </think> and then input the final action in ``` ```.
 You should only output the NEXT ACTION at each interation in the ``` ```. For example, if you want to move up, you should output ```Up```.
-You should plan ahead and need to achieve it in minimum number of steps.
 You should be aware that frozen tiles can be slippery, but the chance is small and you should not overthink it.
 
-Please show your thinking process and put the final action in ``` ```. In every turn, the final action MUST be one of Up, Down, Left, Right.
+Please show your thinking process and put the final action in ``` ```. 
+Your thinking should end in 10 tokens or less.
+In every turn, the final action MUST be one of ```Up```, ```Down```, ```Left```, ```Right```.
+
+Your thinking should be wrapped with <think> and </think> tags.
+You must do some reasoning and planning before outputting the final action!!!
+The final action should be wrapped with ``` ```.
+
+You should strictly follow the answer template (otherwise you will be penalized):
+
+Output example1:
+<think>
+Hmm... the player is at X. The goal is at Y. I should move closer to the goal. ... more reasoning...
+</think>
+```Up``` (or ```Down```, ```Left```, ```Right```)
+
+Output example2:
+<think>
+Wait, where is the player? Where is the goal? I need to check the observation. ... more reasoning...
+</think>
+```Down``` (or ```Up```, ```Left```, ```Right```)
 """
 
     MULTI_SHOT_SYSTEM_PROMPT: str = """You are Qwen, created by Alibaba Cloud. You are a helpful assistant. You are walking on a frozen lake.
@@ -53,7 +76,7 @@ Rules:
 2. Frozen tiles are slippery, you may move perpendicular to your intended direction.
 
 Valid Action (separated by | ):
-Up | Down | Left | Right
+```Up``` | ```Down``` | ```Left``` | ```Right```
 
 Rewards:
 Fall into hole: 0
@@ -138,24 +161,40 @@ Now it is your turn, please show your thinking process and put the final action 
         Updates the agent's internal state after an environment step.
         Includes logic to check if the observation changed from the previous step.
         """
-        current_obs_str = str(observation)
+        # current_obs_str = str(observation)
+        logger.info("=" * 60)
+        logger.info(f"STEP {self.step} - ENVIRONMENT UPDATE")
+        logger.info("=" * 60)
+        logger.info(f"Current Grid State:")
+        logger.info(f"Reward: {reward}, Done: {done}, Info: {info}")
+        logger.info("=" * 60)
         # Base message for the user
-        user_prompt_content = f"Current Observation ({self.step}): \n" + current_obs_str + "\n" + "You have not achieved the goal, P has not reached G yet. Please give the next action."
+        # user_prompt_content = f"Current Observation ({self.step}): \n" + current_obs_str + "\n" + "You have not achieved the goal, P has not reached G yet. Please give the next action."
+        user_prompt_content = f"The observation is attached in the image. You have not achieved the goal, P (the human figure) has not reached G (the treasure icon) yet. Please give the next action."
 
         # Check if the observation is the same as the previous step's observation
         # This check only makes sense if we have completed at least one step (i.e., received a model response and acted)
         if self._trajectory.steps and self._trajectory.steps[-1].action is not None:  # Check if the last step has an action (meaning it's a completed step)
-            last_step_obs_str = self._trajectory.steps[-1].observation
-            if last_step_obs_str == current_obs_str:
+            last_step_obs = self._trajectory.steps[-1].observation
+            if last_step_obs == observation:
                 user_prompt_content += "\nYour last response is invalid. Your position didn't change at all. You may need to recheck your thinking process, action outputted, and the format of response. Remember, you should only output the NEXT ACTION at each interation in the ``` ```. For example, if you want to move up, you should output ```Up```."
 
         if self.max_steps is not None and self.max_steps - self.step > 0:
             user_prompt_content += f"\nThe maximum number of steps remaining is {self.max_steps - self.step}."
 
         # Add the user message for the *next* interaction turn
-        self.messages.append({"role": "user", "content": user_prompt_content})
+        # self.messages.append({"role": "user", "content": user_prompt_content}). # no error when converting to tokens
+        self.messages.append({"role": "user", "content": [ # this results in an error when converting to tokens
+            {
+                "type": "image_url",
+                "image_url": {
+                    "url": f"data:image/png;base64,{observation}"
+                },
+            },
+            {"type": "text", "text": user_prompt_content},
+        ]})
 
-        self.current_observation = current_obs_str
+        self.current_observation = observation
 
     def update_from_model(self, response: str, **kwargs) -> Action:
         content = response
@@ -167,10 +206,14 @@ Now it is your turn, please show your thinking process and put the final action 
 
         thought, action_str = self._parse_model_response(content)
 
+        logger.info(f"🤔 Agent's Thought Process:\n{thought}")
+        logger.info(f"🎯 Parsed Action: {action_str}")
+        logger.info("-" * 60)
+
         new_step = Step(chat_completions=copy.deepcopy(self.chat_completions), thought=thought, action=action_str, model_response=content, observation=self.current_observation)
         self._trajectory.steps.append(new_step)
 
-        self.messages.append({"role": "assistant", "content": content})
+        self.messages.append({"role": "assistant", "content": f"{thought}\n\n{action_str}"})
 
         self.step += 1
 

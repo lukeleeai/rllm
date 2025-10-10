@@ -72,6 +72,11 @@ class ChatTemplateParser:
         Raises:
             ValueError: If the parser_type is not recognized
         """
+        # Handle None tokenizer (for API-based models)
+        if tokenizer is None:
+            print("No tokenizer provided, using default ChatTemplateParser with None tokenizer")
+            return ChatTemplateParser(tokenizer)
+        
         # Determine parser type based on tokenizer name or path
         if isinstance(tokenizer.name_or_path, str):
             model_name = tokenizer.name_or_path.lower()

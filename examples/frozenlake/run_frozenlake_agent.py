@@ -49,7 +49,11 @@ if __name__ == "__main__":
     n_parallel_agents = 1
     model_name = "unsloth/Qwen2-VL-7B-Instruct"
 
+    # Set up tokenizer and processor
+    # Tokenizer handles both text and vision tokens (e.g., <vision_start>, <image_pad>)
+    # Processor handles actual image data (pixel values, preprocessing) - currently None for evaluation
     tokenizer = AutoTokenizer.from_pretrained(model_name)
+    processor = None  # Will be needed for VLM training in the future
 
     sampling_params = {"temperature": 0.6, "top_p": 0.95, "model": model_name}
 
@@ -72,6 +76,7 @@ if __name__ == "__main__":
         env_args=env_args,
         engine_name="openai",
         tokenizer=tokenizer,
+        processor=processor,
         max_steps=max_steps,
         sampling_params=sampling_params,
         rollout_engine_args={

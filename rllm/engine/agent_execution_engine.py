@@ -1,7 +1,10 @@
 import asyncio
 import concurrent.futures
+import datetime
+import json
 import logging
 import base64
+import os
 import time
 import traceback
 import uuid
@@ -37,6 +40,7 @@ class AgentExecutionEngine:
         self,
         engine_name="openai",
         tokenizer=None,
+        processor=None,
         rollout_engine=None,
         chat_parser=None,
         n_parallel_agents=1,
@@ -71,6 +75,12 @@ class AgentExecutionEngine:
         self.engine_name = engine_name
         self.n_parallel_agents = n_parallel_agents
         self.overlong_filter = overlong_filter
+        
+        # Processor for vision-language models (handles image preprocessing)
+        # The tokenizer handles both text and vision tokens (e.g., <vision_start>, <image_pad>)
+        # The processor handles actual image data (pixel values, preprocessing, etc.)
+        # For VLM training, both tokenizer and processor are needed
+        self.processor = processor
 
         # For interaction
         self.gamma = gamma
@@ -247,18 +257,27 @@ class AgentExecutionEngine:
         
         return response
 
-    async def run_agent_trajectory_async(self, idx, application_id, seed=0, mode="Text", **kwargs):
-        """Run a single agent's trajectory asynchronously"""
+    async def run_agent_trajectory_async(self, idx, application_id, seed=0, mode="Text", save_dir=None, **kwargs):
+        """Run a single agent's trajectory asynchronously
+        
+        Args:
+            idx: Index of the agent/environment to use
+            application_id: Unique identifier for the application
+            seed: Random seed for reproducibility
+            mode: Output mode ("Text", "Token", "Conversation", or "Step")
+            save_dir: Optional directory to save trajectory results and evaluation scores
+            **kwargs: Additional arguments to pass to the model
+        """
         agent = self.agents[idx]
         env = self.envs[idx]
         # env_id = env.env_id
 
         termination_reason = None
         prompt_token_len = 0
-        prompt_tokens = []
+        prompt_tokens = []  # Initial system + user messages (task context)
         response_token_len = 0
-        response_tokens = []
-        response_masks = []
+        response_tokens = []  # All subsequent tokens: assistant responses + environment observations
+        response_masks = []  # Mask for response_tokens: 1=assistant (train), 0=environment (context) (for training the models later)
         total_time = 0.0
         reward_time = None
         llm_time = 0.0
@@ -326,10 +345,12 @@ class AgentExecutionEngine:
 
             # Update agent with model response
             action: Action = agent.update_from_model(response)
-            action = action.action
+            actions = action.action
 
             # Take step in environment using the executor
             start_time = time.time()
+            
+            # TODO: handle multiple actions with for loop
 
             try:
                 next_observation, reward, done, info = await asyncio.wait_for(loop.run_in_executor(self.executor, env.step, action), timeout=(self.trajectory_timeout - total_time))
@@ -372,6 +393,21 @@ class AgentExecutionEngine:
             assert env_messages is not None or mode != "Token", "Environment messages is none when accumulating token trajectories which should be conversations. This should not happen."
             assistant_msg_tokens, assistant_msg_masks = [], []
             env_msg_tokens, env_msg_masks = [], []
+            
+            # TODO: FIX FOR VISION-LANGUAGE MODEL TRAINING
+            # Current implementation strips out image data during tokenization.
+            # This works for inference (images sent as base64 to API) but NOT for training.
+            # 
+            # To support VLM training, convert_messages_to_tokens_and_masks needs to:
+            # 1. Accept a processor parameter (handles both text and images)
+            # 2. Insert special image token IDs (e.g., <image>) as placeholders in token sequence
+            # 3. Return: (tokens, masks, pixel_values, image_grid_thw, multi_modal_inputs)
+            # 4. These multimodal data need to be saved in token_result below
+            #
+            # Example for Qwen2-VL:
+            # - input_ids contains text tokens + IMAGE_TOKEN_ID placeholders
+            # - pixel_values contains actual image tensors
+            # - During training: model replaces IMAGE_TOKEN_IDs with visual embeddings
             if assistant_message:
                 assistant_msg_tokens, assistant_msg_masks = convert_messages_to_tokens_and_masks([assistant_message], tokenizer=self.tokenizer, parser=self.chat_parser, contains_first_msg=False, contains_generation_msg=False)
             if env_messages:
@@ -439,6 +475,76 @@ class AgentExecutionEngine:
             reward = await loop.run_in_executor(self.executor, env.compute_final_reward)
             reward_time = time.time() - start_time
             cur_step.reward = reward
+        
+        # Optional: Call environment-specific evaluation (e.g., OSWorld, WebArena)
+        # This returns a score (typically 0.0 to 1.0) based on task success
+        final_score = None
+        if hasattr(env, "evaluate"):
+            start_time = time.time()
+            final_score = await loop.run_in_executor(self.executor, env.evaluate)
+            eval_time = time.time() - start_time
+            logger.info(f"[Trajectory {idx}] Evaluation score: {final_score} (took {eval_time:.2f}s)")
+        
+        # Save results if save_dir is provided
+        if save_dir:
+            os.makedirs(save_dir, exist_ok=True)
+            
+            # Save evaluation score to result.txt
+            if final_score is not None:
+                result_path = os.path.join(save_dir, "result.txt")
+                with open(result_path, "w", encoding="utf-8") as f:
+                    f.write(f"{final_score}\n")
+                logger.info(f"[Trajectory {idx}] Saved result to {result_path}")
+            
+            # Save detailed trajectory to traj.jsonl
+            traj_path = os.path.join(save_dir, "traj.jsonl")
+            with open(traj_path, "w", encoding="utf-8") as f:
+                for step_idx, step in enumerate(trajectory.steps):
+                    # Prepare observation data (exclude large binary data like screenshots)
+                    observation_data = {}
+                    if isinstance(step.observation, dict):
+                        for key, value in step.observation.items():
+                            if key == "screenshot":
+                                # Just indicate that a screenshot exists, don't save the binary data
+                                observation_data[key] = f"<screenshot_saved_as_step_{step_idx}.png>"
+                            elif isinstance(value, (str, int, float, bool, list, dict, type(None))):
+                                observation_data[key] = value
+                            else:
+                                observation_data[key] = str(value)
+                    else:
+                        observation_data = str(step.observation)
+                    
+                    step_data = {
+                        "step_num": step_idx,
+                        "thought": step.thought,
+                        "action": str(step.action),
+                        "observation": observation_data,
+                        "model_response": step.model_response,
+                        "reward": step.reward,
+                        "done": step.done,
+                        "mc_return": step.mc_return,
+                        "info": step.info,
+                        "timestamp": datetime.datetime.now().strftime("%Y%m%d@%H%M%S"),
+                    }
+                    f.write(json.dumps(step_data, ensure_ascii=False))
+                    f.write("\n")
+            logger.info(f"[Trajectory {idx}] Saved trajectory to {traj_path}")
+            
+            # Save trajectory summary
+            summary_path = os.path.join(save_dir, "trajectory_summary.json")
+            summary_data = {
+                "total_steps": len(trajectory.steps),
+                "total_reward": trajectory.reward,
+                "final_score": final_score,
+                "termination_reason": termination_reason,
+                "masked_out": masked_out,
+                "execution_time": total_time,
+                "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            }
+            with open(summary_path, "w", encoding="utf-8") as f:
+                json.dump(summary_data, f, indent=2, ensure_ascii=False)
+            logger.info(f"[Trajectory {idx}] Saved summary to {summary_path}")
+        
         # Closing environment using the executor.
         await loop.run_in_executor(self.executor, env.close)
         if termination_reason:
@@ -461,6 +567,11 @@ class AgentExecutionEngine:
         if mode == "Text":
             return trajectory
         elif mode == "Token":
+            # TODO: ADD MULTIMODAL DATA FOR VLM TRAINING
+            # Current token_result only contains text tokens, which is insufficient for training
+            # vision-language models.
+            # Visual input tokens should be accumulated during the trajectory loop above (similar to response_tokens)
+            # and passed to the trainer for proper VLM training.
             token_result = {
                 "prompt_tokens": torch.tensor(prompt_tokens, dtype=torch.long),
                 "response_tokens": torch.tensor(response_tokens, dtype=torch.long),
@@ -589,7 +700,9 @@ class AgentExecutionEngine:
                     self.agents[index] = self.agent_class(**self.agent_args)
                     assert self.agents[index] is not None and isinstance(self.agents[index], BaseAgent), "Agent is not initalized or not inheriting from BaseAgent"
                     self.agents[index].trajectory.task = task  # type: ignore
-                    res = await self.run_agent_trajectory_async(index, application_id=task_id)
+                    # Extract save_dir from task if available
+                    save_dir = task.get("result_dir", None)
+                    res = await self.run_agent_trajectory_async(index, application_id=task_id, save_dir=save_dir)
                     res.task = task
                     completed += 1
                     colorful_print(f"Progress: {completed}/{total} trajectories completed", "cyan")

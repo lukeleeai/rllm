@@ -199,3 +199,16 @@ rllm/data/train/code/livecodebench.json
 rllm/data/train/code/kodcode.json
 rllm/data/train/code/primeintellect.json
 rllm/data/train/code/primeintellect_dedupe.json
+
+# VMware VM data and lock files (very large - 97GB+)
+vmware_vm_data/
+.vmware_lck
+.vmware_vms
+
+# OSWorld evaluation results
+results/osworld/
+
+# OSWorld credentials and secrets
+examples/osworld/evaluation_examples/settings/googledrive/credentials.json
+examples/osworld/evaluation_examples/settings/googledrive/client_secrets.json
+examples/osworld/evaluation_examples/settings/google/settings.json
